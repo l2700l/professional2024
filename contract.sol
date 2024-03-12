@@ -17,9 +17,9 @@ struct NFT {
     string name;
     string description;
     string image;
-    uint price;
+    mapping(address owner => uint) prices;
     uint count;
-    uint to_sale;
+    mapping(address owner => uint) to_sales;
     uint timestamp;
     uint collection;
 }
@@ -100,15 +100,52 @@ contract PROFIContract {
         return keccak256(abi.encode(str));
     }
 
-    // пример как из remix получать информацию по другому контракту, в коде можно просто получить NFTContract, подключиться к самому контракту и из него уже все дергать
-    function getNFT(uint id) public view returns (uint256,string memory,string memory,string memory,uint256,uint256,uint256,uint256,uint256) {
-        return NFTcontract.ntf(id);
+    function buyNFT(address from, uint nftId, uint amount) public {
+        // такой вариант проще, потому что в структуре nft есть mapping'и
+        uint cost = NFTcontract.beforeBuy(nftId, amount, from, balances[msg.sender], discount[msg.sender]);
+        if (cost != 0) {
+            balances[msg.sender] -= cost;
+            balances[from] += cost;
+            // Переводим NFT покупателю
+            for (uint i = 0; i < amount; i++) {
+                NFTcontract.safeTransferFrom(from, msg.sender, nftId, 1);
+            }
+        }
     }
+
+    function saleNFT(uint nftId, uint price, uint count) public {
+        NFTcontract.saleNFT(msg.sender, nftId, price, count);
+    }
+
+    // аукцион…
+    // этот код нагенерировал чатгпт, но он не полный
+    // struct Auction {
+    //     uint startTime;
+    //     uint endTime;
+    //     uint startPrice;
+    //     uint maxPrice;
+    //     address owner;
+    //     bool active;
+    // }
+
+    // // Хранение аукционов
+    // mapping(uint => Auction) public auctions;
+
+    // // Функция для старта аукциона
+    // function startAuction(uint auctionId, uint startTime, uint endTime, uint startPrice, uint maxPrice) public {
+    //     auctions[auctionId] = Auction(startTime, endTime, startPrice, maxPrice, msg.sender, true);
+    // }
+
+    // // Функция для окончания аукциона
+    // function endAuction(uint auctionId) public {
+    //     require(auctions[auctionId].endTime < block.timestamp, "Auction has not ended yet");
+    //     auctions[auctionId].active = false;
+    // }
 }
 
 contract NFTContract {
     // храним данные
-    mapping(uint256 id => NFT) public ntf;
+    mapping(uint256 id => NFT) public nft;
     mapping(uint256 id => Collection) public collection;
     mapping(uint256 id => mapping(address account => uint256)) public balances;
     uint[] public NFTs;
@@ -221,17 +258,15 @@ contract NFTContract {
     // создание нфт и присвоение владельцу
     function createNFT(string memory name, string memory description, string memory image, uint price, uint count, uint collectionId) checkOwner public returns (uint) {
         uint id = NFTs.length+1;
-        ntf[id] = NFT(
-            id, 
-            name, 
-            description,
-            image,
-            price,
-            count,
-            0,
-            block.timestamp,
-            collectionId
-        );
+        NFT storage newNft = nft[id];
+        newNft.id = id;
+        newNft.name = name;
+        newNft.description = description;
+        newNft.image = image;
+        newNft.timestamp = block.timestamp;
+        newNft.collection = collectionId;
+        newNft.count = count;
+        newNft.prices[owner] = price;
         NFTs.push(id);
         mint(owner, id, count);
         return id;
@@ -325,6 +360,23 @@ contract NFTContract {
             // Update the free memory pointer by pointing after the second array
             mstore(0x40, add(array2, 0x40))
         }
+    }
+
+    function beforeBuy(uint nftId, uint amount, address from, uint balance, uint discount) checkOwner public view returns(uint) {
+        // Проверяем, что NFT доступен для продажи
+        require(nft[nftId].collection == 0 || from != owner, "Not for simple sale");
+        require(nft[nftId].to_sales[from] >= amount, "Not enough NFT available for sale");
+
+        // Проверяем, что отправленная сумма достаточна
+        require(balance >= nft[nftId].prices[from] * amount - ((nft[nftId].prices[from] * amount * discount / 100)), "Insufficient funds");
+        return nft[nftId].prices[from] * amount - ((nft[nftId].prices[from] * amount * discount / 100));
+    }
+
+    function saleNFT(address from, uint nftId, uint price, uint count) public {
+        require(nft[nftId].collection == 0 || from != owner, "Not for simple sale");
+        require(balances[nftId][from] >= count, "sale count error");
+        nft[nftId].prices[from] = price;
+        nft[nftId].to_sales[from] = count;
     }
 
     // проверка что дергает тот кому нужно
