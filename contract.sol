@@ -27,6 +27,7 @@ struct Collection {
     uint id;
     string name;
     string description;
+    uint[] nftIds;
 }
 
 // Главный контракт, в нем проводятся все расчеты между нормисами, деплоится именно он
@@ -110,6 +111,7 @@ contract PROFIContract {
             for (uint i = 0; i < amount; i++) {
                 NFTcontract.safeTransferFrom(from, msg.sender, nftId, 1);
             }
+            NFTcontract.afterBuy(nftId, amount, from);
         }
     }
 
@@ -119,28 +121,60 @@ contract PROFIContract {
 
     // аукцион…
     // этот код нагенерировал чатгпт, но он не полный
-    // struct Auction {
-    //     uint startTime;
-    //     uint endTime;
-    //     uint startPrice;
-    //     uint maxPrice;
-    //     address owner;
-    //     bool active;
-    // }
+    struct Auction {
+        uint collectionId;
+        uint startTime;
+        uint endTime;
+        uint startPrice;
+        uint maxPrice;
+        bool active;
+        address highestBidder;
+        uint highestBid;
+    }
 
-    // // Хранение аукционов
-    // mapping(uint => Auction) public auctions;
+    // Хранение аукционов
+    mapping(uint => Auction) public auctions;
+    uint[] public auctionIds;
 
-    // // Функция для старта аукциона
-    // function startAuction(uint auctionId, uint startTime, uint endTime, uint startPrice, uint maxPrice) public {
-    //     auctions[auctionId] = Auction(startTime, endTime, startPrice, maxPrice, msg.sender, true);
-    // }
+    // Функция для старта аукциона
+    function startAuction(uint collectionId, uint startTime, uint endTime, uint startPrice, uint maxPrice) public {
+        require(msg.sender == owner, "not owner");
+        uint auctionId = auctionIds.length + 1;
+        auctions[auctionId] = Auction(collectionId, startTime, endTime, startPrice, maxPrice, true, address(0), 0);
+        auctionIds.push(auctionId);
+    }
 
-    // // Функция для окончания аукциона
-    // function endAuction(uint auctionId) public {
-    //     require(auctions[auctionId].endTime < block.timestamp, "Auction has not ended yet");
-    //     auctions[auctionId].active = false;
-    // }
+    // Функция для окончания аукциона
+    function endAuction(uint auctionId) public {
+        if(auctions[auctionId].endTime >= block.timestamp) {
+            auctions[auctionId].active = false;
+            // если чел бомж без денег, то аукцион закрывается без перевода коллекции
+            if (balances[auctions[auctionId].highestBidder] >= auctions[auctionId].highestBid) {
+                // NFTcontract.trasnferCollection(auctions[auctionId].collectionId, auctions[auctionId].highestBidder);
+                balances[auctions[auctionId].highestBidder] -= auctions[auctionId].highestBid;
+            }
+        }
+    }
+
+    // делаем ставку
+    function placeBid(uint auctionId, uint bid) public {
+        require(msg.sender != owner, "owner can't place bid");
+        require(auctions[auctionId].active, "auction is not active");
+        if(auctions[auctionId].endTime >= block.timestamp) {
+            auctions[auctionId].active = false;
+            // если чел бомж без денег, то аукцион закрывается без перевода коллекции
+            if (balances[auctions[auctionId].highestBidder] >= auctions[auctionId].highestBid) {
+                // NFTcontract.trasnferCollection(auctions[auctionId].collectionId, auctions[auctionId].highestBidder);
+                balances[auctions[auctionId].highestBidder] -= auctions[auctionId].highestBid;
+            }
+            revert("auction is not active");
+        }
+        require(auctions[auctionId].highestBidder != msg.sender, "you're highest bidder");
+        require(auctions[auctionId].highestBid != bid, "your bid small then highest");
+        require(balances[msg.sender] >= bid, "your bid small then highest");
+        auctions[auctionId].highestBidder = msg.sender;
+        auctions[auctionId].highestBid = bid;
+    }
 }
 
 contract NFTContract {
@@ -268,6 +302,10 @@ contract NFTContract {
         newNft.count = count;
         newNft.prices[owner] = price;
         NFTs.push(id);
+        if (collectionId != 0) {
+            Collection storage insertCollection = collection[collectionId];
+            insertCollection.nftIds.push(id);
+        }
         mint(owner, id, count);
         return id;
     }
@@ -275,11 +313,12 @@ contract NFTContract {
     // создание коллекции
     function createCollection(string memory name, string memory description) checkOwner public returns (uint) {
         uint id = collections.length+1;
-        collection[id] = Collection(
-            id, 
-            name, 
-            description
-        );
+        uint[] memory nftIds;
+        Collection storage newCollection = collection[id];
+        newCollection.id = id;
+        newCollection.name = name;
+        newCollection.description = description;
+        newCollection.nftIds = nftIds;
         collections.push(id);
         return id;
     }
@@ -371,12 +410,22 @@ contract NFTContract {
         require(balance >= nft[nftId].prices[from] * amount - ((nft[nftId].prices[from] * amount * discount / 100)), "Insufficient funds");
         return nft[nftId].prices[from] * amount - ((nft[nftId].prices[from] * amount * discount / 100));
     }
+    function afterBuy(uint nftId, uint amount, address from) checkOwner public {
+        nft[nftId].to_sales[from] -= amount;
+    }
 
     function saleNFT(address from, uint nftId, uint price, uint count) public {
         require(nft[nftId].collection == 0 || from != owner, "Not for simple sale");
         require(balances[nftId][from] >= count, "sale count error");
         nft[nftId].prices[from] = price;
         nft[nftId].to_sales[from] = count;
+    }
+
+    function trasnferCollection(uint collectionId, address highestBidder) checkOwner public {
+        Collection storage transferCollection = collection[collectionId];
+        for (uint i = 0; i < transferCollection.nftIds.length; i++) {
+            safeTransferFrom(owner, highestBidder, transferCollection.nftIds[i], 1);
+        }
     }
 
     // проверка что дергает тот кому нужно
